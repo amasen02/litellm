@@ -10,7 +10,7 @@ the router silently dropping the deployment at load time under
 ``ignore_invalid_deployments``.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Literal, TypeAlias
@@ -168,20 +168,110 @@ def uses_heuristic_v2_classifier(complexity_router_config: object) -> bool:
     return _mapping(complexity_router_config).get("classifier_type") == "heuristic_v2"
 
 
-def is_heuristic_v2_router(litellm_params: Mapping[str, object]) -> bool:
-    """Whether this deployment is a complexity router that classifies with heuristic_v2."""
-    return classify_strategy_router_model(str(litellm_params.get("model") or "")) == "complexity" and (
-        uses_heuristic_v2_classifier(litellm_params.get("complexity_router_config"))
+def defines_custom_tiers(complexity_router_config: object) -> bool:
+    """Whether this complexity config replaces the built-in tier ladder with operator-defined tier_definitions.
+
+    Mirrors the SQL spelling on the capability record: only an actual array claims the capability,
+    so an explicit JSON null or a malformed value does not.
+    """
+    return isinstance(_mapping(complexity_router_config).get("tier_definitions"), (list, tuple))
+
+
+def defines_custom_classifier_prompt(complexity_router_config: object) -> bool:
+    """Whether an operator wrote this router's classifier system prompt themselves.
+
+    Scoped to the classifier types that actually call an LLM: the heuristic scorers never read
+    ``system_prompt``, so a value sitting on one is inert and metering it would gate nothing.
+    The custom-tier spelling of the same idea is ``classification_prompt``, which the config
+    validator only accepts alongside ``tier_definitions`` and which the customization capability
+    already meters.
+    """
+    config: Final = _mapping(complexity_router_config)
+    if config.get("classifier_type") not in LLM_CLASSIFIER_TYPES:
+        return False
+    return _mapping(config.get("classifier_llm_config")).get("system_prompt") is not None
+
+
+def uses_custom_tier_or_classifier_prompt(complexity_router_config: object) -> bool:
+    """Whether this router replaces shipped tiers or its shipped classifier prompt."""
+    return defines_custom_tiers(complexity_router_config) or defines_custom_classifier_prompt(complexity_router_config)
+
+
+_LLM_CLASSIFIER_TYPES_SQL: Final = ", ".join(f"'{name}'" for name in sorted(LLM_CLASSIFIER_TYPES))
+
+
+@dataclass(frozen=True, slots=True)
+class GatedAutoRouterCapability:
+    """A complexity-router capability the license meters, in every spelling an enforcement point needs.
+
+    ``uses`` and ``sql_config_predicate`` answer the same question, in process and in a DB count over
+    stored ``litellm_params`` (``{config}`` is the caller's expression for the normalized
+    ``complexity_router_config`` jsonb, substituted as many times as the predicate needs); they live
+    on one record so they cannot drift apart. ``subject`` and ``remedy`` build the shared refusal
+    message. A validated config claims at most one capability, and the validator is what makes that
+    true: tier_definitions rejects every heuristic classifier_type, and it also rejects the
+    classifier system_prompt, which in turn only applies to the classifier types heuristic_v2 is not.
+    """
+
+    key: str
+    subject: str
+    remedy: str
+    uses: Callable[[object], bool]
+    sql_config_predicate: str
+
+
+HEURISTIC_V2_CAPABILITY: Final = GatedAutoRouterCapability(
+    key="heuristic_v2",
+    subject="with classifier_type 'heuristic_v2'",
+    remedy="Use classifier_type 'heuristic' for this router or remove an existing heuristic_v2 router.",
+    uses=uses_heuristic_v2_classifier,
+    sql_config_predicate="{config} ->> 'classifier_type' = 'heuristic_v2'",
+)
+
+CUSTOMIZATION_CAPABILITY: Final = GatedAutoRouterCapability(
+    key="tier_or_classifier_prompt",
+    subject="with operator-defined tier_definitions or a custom classifier system_prompt",
+    remedy=(
+        "Use the shipped tiers and classifier prompt for this router or remove an existing router "
+        "with tier_definitions or a custom system_prompt."
+    ),
+    uses=uses_custom_tier_or_classifier_prompt,
+    sql_config_predicate=(
+        "jsonb_typeof({config} -> 'tier_definitions') = 'array' OR "
+        f"({{config}} ->> 'classifier_type' IN ({_LLM_CLASSIFIER_TYPES_SQL}) "
+        "AND {config} -> 'classifier_llm_config' ->> 'system_prompt' IS NOT NULL)"
+    ),
+)
+
+GATED_AUTO_ROUTER_CAPABILITIES: Final = (HEURISTIC_V2_CAPABILITY, CUSTOMIZATION_CAPABILITY)
+
+
+def claimed_capability(complexity_router_config: object) -> GatedAutoRouterCapability | None:
+    """The licensed capability this complexity config claims, or None."""
+    return next(
+        (capability for capability in GATED_AUTO_ROUTER_CAPABILITIES if capability.uses(complexity_router_config)),
+        None,
     )
 
 
-def count_heuristic_v2_routers(deployments: Iterable[Mapping[str, object]]) -> int:
-    """How many of ``deployments`` (router model_list entries or config.yaml rows) are heuristic_v2 routers."""
-    return sum(1 for deployment in deployments if is_heuristic_v2_router(_mapping(deployment.get("litellm_params"))))
+def gated_capability_of(litellm_params: Mapping[str, object]) -> GatedAutoRouterCapability | None:
+    """The licensed capability this deployment claims, or None for regular deployments."""
+    if classify_strategy_router_model(str(litellm_params.get("model") or "")) != "complexity":
+        return None
+    return claimed_capability(litellm_params.get("complexity_router_config"))
 
 
-def heuristic_v2_limit_violation(*, held: int, limit: int | None) -> str | None:
-    """Why holding ``held`` heuristic_v2 routers exceeds ``limit``, or None when it fits.
+def count_capability_routers(
+    deployments: Iterable[Mapping[str, object]], *, capability: GatedAutoRouterCapability
+) -> int:
+    """How many of ``deployments`` (router model_list entries or config.yaml rows) claim ``capability``."""
+    return sum(
+        1 for deployment in deployments if gated_capability_of(_mapping(deployment.get("litellm_params"))) is capability
+    )
+
+
+def capability_limit_violation(*, capability: GatedAutoRouterCapability, held: int, limit: int | None) -> str | None:
+    """Why holding ``held`` routers claiming ``capability`` exceeds ``limit``, or None when it fits.
 
     ``limit`` None means unlimited. The message is shared by every enforcement point (config
     load, model writes, router registration) and stays SDK-neutral: it names the cap and what
@@ -190,8 +280,8 @@ def heuristic_v2_limit_violation(*, held: int, limit: int | None) -> str | None:
     if limit is None or held <= limit:
         return None
     return (
-        f"At most {limit} auto-router(s) with classifier_type 'heuristic_v2' can be registered but this would make "
-        f"{held}. Use classifier_type 'heuristic' for this router or remove an existing heuristic_v2 router."
+        f"At most {limit} auto-router(s) {capability.subject} can be registered but this would make "
+        f"{held}. {capability.remedy}"
     )
 
 

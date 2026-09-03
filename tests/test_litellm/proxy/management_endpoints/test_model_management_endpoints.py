@@ -2,6 +2,7 @@ import inspect
 import asyncio
 import contextlib
 import json
+from collections.abc import Mapping
 from typing import Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -4354,20 +4355,20 @@ class TestStrategyRouterWriteValidation:
         )
 
     @staticmethod
-    def _live_router_holding_one_heuristic_v2(limit: int | None) -> Router:
+    def _live_router_holding_one_capability(limit: int | None, config: Mapping[str, object]) -> Router:
         return Router(
             model_list=[
                 {"model_name": "gpt-4o-mini", "litellm_params": {"model": "openai/gpt-4o-mini", "api_key": "k"}},
                 {
-                    "model_name": "held-v2",
+                    "model_name": "held",
                     "litellm_params": {
                         "model": "auto_router/complexity_router",
-                        "complexity_router_config": {"classifier_type": "heuristic_v2", "tiers": {"SIMPLE": "gpt-4o-mini"}},
+                        "complexity_router_config": config,
                     },
                     "model_info": {"id": "held-id"},
                 },
             ],
-            heuristic_v2_router_limit=lambda: limit,
+            auto_router_capability_limit=lambda: limit,
         )
 
     class _FakeTx:
@@ -4403,6 +4404,31 @@ class TestStrategyRouterWriteValidation:
 
     _V2 = {"classifier_type": "heuristic_v2", "tiers": {"SIMPLE": "gpt-4o-mini"}}
     _V1 = {"classifier_type": "heuristic", "tiers": {"SIMPLE": "gpt-4o-mini"}}
+    _CUSTOM_TIERS = {
+        "classifier_type": "llm",
+        "classifier_llm_config": {"model": "gpt-4o-mini"},
+        "tier_definitions": [
+            {"name": "routine", "description": "routine drafting"},
+            {"name": "hard", "description": "hard reasoning"},
+        ],
+        "tiers": {"routine": "gpt-4o-mini", "hard": "gpt-4o"},
+        "fallback_tier": "routine",
+    }
+    _TIER_LABELS_ONLY = {
+        "classifier_type": "heuristic",
+        "tiers": {"SIMPLE": "gpt-4o-mini"},
+        "tier_labels": {"SIMPLE": "Cheap"},
+    }
+    _CUSTOM_PROMPT = {
+        "classifier_type": "llm",
+        "classifier_llm_config": {"model": "gpt-4o-mini", "system_prompt": "judge it my way"},
+        "tiers": {"SIMPLE": "gpt-4o-mini"},
+    }
+    _SHIPPED_RUBRIC = {
+        "classifier_type": "llm",
+        "classifier_llm_config": {"model": "gpt-4o-mini", "classification_rubric": "agentic"},
+        "tiers": {"SIMPLE": "gpt-4o-mini"},
+    }
 
     @pytest.mark.parametrize(
         "incoming,existing,expected",
@@ -4431,41 +4457,61 @@ class TestStrategyRouterWriteValidation:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "limit,effective_config,db_held,config_holds_one,model_id,expected",
+        "limit,effective_config,db_held,config_config,model_id,expected",
         [
-            (1, _V2, 1, False, None, "refused"),
-            (1, _V2, 0, True, None, "refused"),
-            (1, _V2, 0, False, None, "reserved"),
-            (1, _V2, 0, False, "held-id", "reserved"),
-            (2, _V2, 1, False, None, "reserved"),
-            (1, _V1, 5, True, None, "plain"),
-            (1, None, 5, True, None, "plain"),
-            (None, _V2, 5, True, None, "plain"),
+            (1, _V2, 1, None, None, "refused"),
+            (1, _V2, 0, _V2, None, "refused"),
+            (1, _V2, 0, None, None, "reserved"),
+            (1, _V2, 0, None, "held-id", "reserved"),
+            (2, _V2, 1, None, None, "reserved"),
+            (1, _V1, 5, _V2, None, "plain"),
+            (1, None, 5, _V2, None, "plain"),
+            (None, _V2, 5, _V2, None, "plain"),
+            (1, _CUSTOM_TIERS, 1, None, None, "refused"),
+            (1, _CUSTOM_TIERS, 0, None, None, "reserved"),
+            (1, _CUSTOM_TIERS, 0, _CUSTOM_TIERS, None, "refused"),
+            (1, _CUSTOM_TIERS, 0, _CUSTOM_PROMPT, None, "refused"),
+            (1, _CUSTOM_TIERS, 0, None, "held-id", "reserved"),
+            (2, _CUSTOM_TIERS, 1, None, None, "reserved"),
+            (None, _CUSTOM_TIERS, 5, _CUSTOM_PROMPT, None, "plain"),
+            (1, _TIER_LABELS_ONLY, 5, _CUSTOM_TIERS, None, "plain"),
+            (1, _CUSTOM_PROMPT, 1, None, None, "refused"),
+            (1, _CUSTOM_PROMPT, 0, None, None, "reserved"),
+            (1, _CUSTOM_PROMPT, 0, _CUSTOM_PROMPT, None, "refused"),
+            (1, _CUSTOM_PROMPT, 0, _CUSTOM_TIERS, None, "refused"),
+            (None, _CUSTOM_PROMPT, 5, _CUSTOM_TIERS, None, "plain"),
+            (1, _SHIPPED_RUBRIC, 5, _CUSTOM_TIERS, None, "plain"),
         ],
     )
-    async def test_heuristic_v2_slot_matrix(
+    async def test_auto_router_capability_slot_matrix(
         self,
         limit: int | None,
         effective_config: object,
         db_held: int,
-        config_holds_one: bool,
+        config_config: Mapping[str, object] | None,
         model_id: str | None,
         expected: str,
     ) -> None:
-        """The slot is claimed inside a locked transaction only for a heuristic_v2 write under a limit; the DB rows
-        (other pods included) plus config.yaml routers decide, the row being edited is excluded through the SQL
-        parameter, and every other write runs on the plain client with no lock."""
+        """The slot is claimed inside a locked transaction only for a write that claims a licensed capability
+        under a limit; the DB rows (other pods included) plus config.yaml routers decide, the row being edited
+        is excluded through the SQL parameter, and every other write runs on the plain client with no lock.
+
+        heuristic_v2 has its own slot, while custom tier definitions and custom prompts count into one shared
+        customization slot. Renaming built-in tiers through tier_labels claims nothing at all."""
         from fastapi import HTTPException
 
         from litellm.proxy.management_endpoints.model_management_endpoints import (
-            HEURISTIC_V2_SLOT_LOCK_KEY,
-            _heuristic_v2_slot,
+            AUTO_ROUTER_CAPABILITY_SLOT_LOCK_KEY,
+            _auto_router_capability_slot,
         )
+        from litellm.router_utils.auto_router_model_naming import claimed_capability
+
+        capability = claimed_capability(effective_config)
 
         fake = self._FakeDb(db_held)
-        live_router = self._live_router_holding_one_heuristic_v2(limit) if config_holds_one else None
+        live_router = self._live_router_holding_one_capability(limit, config_config) if config_config is not None else None
         with (
-            patch("litellm.proxy.proxy_server._license_check.heuristic_v2_router_limit", lambda: limit),  # test-quality-ok: the guard reads the proxy license singleton with no injection seam
+            patch("litellm.proxy.proxy_server._license_check.auto_router_capability_limit", lambda: limit),  # test-quality-ok: the guard reads the proxy license singleton with no injection seam
             patch("litellm.proxy.proxy_server.llm_router", live_router),  # test-quality-ok: the guard reads the proxy router global with no injection seam
             patch(  # test-quality-ok: the cross-pod publish is the side effect under test; redis is not configured here
                 "litellm.proxy.management_endpoints.model_management_endpoints.publish_config_change",
@@ -4474,13 +4520,15 @@ class TestStrategyRouterWriteValidation:
         ):
             if expected == "refused":
                 with pytest.raises(HTTPException) as exc_info:
-                    async with _heuristic_v2_slot(fake, effective_config=effective_config, model_id=model_id):
+                    async with _auto_router_capability_slot(fake, effective_config=effective_config, model_id=model_id):
                         pass
                 assert exc_info.value.status_code == 403
+                assert capability is not None
                 assert "At most 1 auto-router" in str(exc_info.value.detail)
+                assert capability.subject in str(exc_info.value.detail)
                 assert "'auto_router' feature lifts the limit" in str(exc_info.value.detail)
                 return
-            async with _heuristic_v2_slot(fake, effective_config=effective_config, model_id=model_id) as tables:
+            async with _auto_router_capability_slot(fake, effective_config=effective_config, model_id=model_id) as tables:
                 handle = tables
         if expected == "plain":
             await handle.create(data={})
@@ -4489,10 +4537,12 @@ class TestStrategyRouterWriteValidation:
             return
         assert handle is fake.tx_obj.litellm_proxymodeltable
         published.assert_awaited_once_with(redis_cache=None, object_type="litellm_proxymodeltable")
-        (lock_sql, lock_params), (_count_sql, count_params) = fake.tx_obj.raw_calls
+        (lock_sql, lock_params), (count_sql, count_params) = fake.tx_obj.raw_calls
         assert "pg_advisory_xact_lock($1)" in lock_sql and "count" not in lock_sql
-        assert lock_params == (HEURISTIC_V2_SLOT_LOCK_KEY,)
+        assert lock_params == (AUTO_ROUTER_CAPABILITY_SLOT_LOCK_KEY,)
         assert count_params == (model_id or "",)
+        assert capability is not None
+        assert capability.sql_config_predicate.split("{config}")[-1].strip() in count_sql
 
     @pytest.mark.asyncio
     async def test_team_model_bookkeeping_runs_after_the_slot_is_released(self) -> None:
@@ -4556,7 +4606,7 @@ class TestStrategyRouterWriteValidation:
             patch("litellm.proxy.proxy_server.llm_router", None),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch("litellm.proxy.proxy_server.store_model_in_db", True),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch("litellm.proxy.proxy_server.premium_user", True),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
-            patch("litellm.proxy.proxy_server._license_check.heuristic_v2_router_limit", lambda: 1),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
+            patch("litellm.proxy.proxy_server._license_check.auto_router_capability_limit", lambda: 1),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch(  # test-quality-ok: prior auth check needs a live DB; only the license limit is under test
                 "litellm.proxy.management_endpoints.model_management_endpoints.ModelManagementAuthChecks.can_user_make_model_call",
                 new=AsyncMock(return_value=None),
@@ -4598,7 +4648,7 @@ class TestStrategyRouterWriteValidation:
             patch("litellm.proxy.proxy_server.llm_router", None),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch("litellm.proxy.proxy_server.store_model_in_db", True),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch("litellm.proxy.proxy_server.premium_user", True),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
-            patch("litellm.proxy.proxy_server._license_check.heuristic_v2_router_limit", lambda: 1),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
+            patch("litellm.proxy.proxy_server._license_check.auto_router_capability_limit", lambda: 1),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch(  # test-quality-ok: the write must be refused before this DB step runs
                 "litellm.proxy.management_endpoints.model_management_endpoints.get_db_model",
                 new=AsyncMock(return_value=self._db_complexity_router(model_id)),
@@ -4650,7 +4700,7 @@ class TestStrategyRouterWriteValidation:
             patch("litellm.proxy.proxy_server.llm_router", None),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch("litellm.proxy.proxy_server.store_model_in_db", True),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch("litellm.proxy.proxy_server.premium_user", True),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
-            patch("litellm.proxy.proxy_server._license_check.heuristic_v2_router_limit", lambda: 1),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
+            patch("litellm.proxy.proxy_server._license_check.auto_router_capability_limit", lambda: 1),  # test-quality-ok: endpoint reads proxy server globals with no injection seam
             patch(  # test-quality-ok: prior auth check needs a live DB; only the license limit is under test
                 "litellm.proxy.management_endpoints.model_management_endpoints.ModelManagementAuthChecks.can_user_make_model_call",
                 new=AsyncMock(return_value=None),

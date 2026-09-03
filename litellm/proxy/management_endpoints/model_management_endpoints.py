@@ -50,7 +50,7 @@ from litellm.proxy._types import (
     TeamModelDeleteRequest,
     UserAPIKeyAuth,
 )
-from litellm.proxy.auth.litellm_license import HEURISTIC_V2_LICENSE_REMEDY
+from litellm.proxy.auth.litellm_license import AUTO_ROUTER_LICENSE_REMEDY
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.common_utils.config_sync_pubsub import (
     coordination_redis_cache,
@@ -96,11 +96,12 @@ from litellm.router_strategy.complexity_router import (
     normalize_classification_prompt,
 )
 from litellm.router_utils.auto_router_model_naming import (
+    GATED_AUTO_ROUTER_CAPABILITIES,
     STRATEGY_ROUTER_PARAM_FIELDS,
+    capability_limit_violation,
     carries_complexity_router_settings,
-    count_heuristic_v2_routers,
-    heuristic_v2_limit_violation,
-    uses_heuristic_v2_classifier,
+    claimed_capability,
+    count_capability_routers,
     validate_complexity_router_config_placement,
     validate_complexity_router_config_write,
     validate_strategy_router_model_write,
@@ -279,14 +280,22 @@ def _raise_on_strategy_router_write_violation(
     )
 
 
-HEURISTIC_V2_SLOT_LOCK_KEY: Final = 5_872_301
-_HEURISTIC_V2_LOCK_SQL: Final = "SELECT 1 AS locked FROM pg_advisory_xact_lock($1)"
-_HEURISTIC_V2_DB_ROWS_SQL: Final = """
+AUTO_ROUTER_CAPABILITY_SLOT_LOCK_KEY: Final = 5_872_301
+_CAPABILITY_LOCK_SQL: Final = "SELECT 1 AS locked FROM pg_advisory_xact_lock($1)"
+_STORED_COMPLEXITY_CONFIG_SQL: Final = (
+    "(CASE jsonb_typeof(litellm_params) WHEN 'string' THEN (litellm_params #>> '{}')::jsonb "
+    "ELSE litellm_params END) -> 'complexity_router_config'"
+)
+_CAPABILITY_DB_ROWS_SQL: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        capability.key: f"""
 SELECT count(*)::int AS held FROM "LiteLLM_ProxyModelTable"
 WHERE model_id <> $1
-  AND (CASE jsonb_typeof(litellm_params) WHEN 'string' THEN (litellm_params #>> '{}')::jsonb ELSE litellm_params END)
-      -> 'complexity_router_config' ->> 'classifier_type' = 'heuristic_v2'
+  AND ({capability.sql_config_predicate.format(config=_STORED_COMPLEXITY_CONFIG_SQL)})
 """
+        for capability in GATED_AUTO_ROUTER_CAPABILITIES
+    }
+)
 
 
 def _effective_complexity_router_config(
@@ -300,12 +309,12 @@ def _effective_complexity_router_config(
 
 
 @asynccontextmanager
-async def _heuristic_v2_slot(
+async def _auto_router_capability_slot(
     prisma_client: PrismaClient, *, effective_config: object, model_id: str | None
 ) -> AsyncGenerator[_ProxyModelTable, None]:
-    """Hand out the model table to write through while the row's claim on a heuristic_v2 slot is settled.
+    """Hand out the model table to write through while the row's claim on a licensed capability is settled.
 
-    A write that leaves the row on classifier_type heuristic_v2 under a limited license runs
+    A write that leaves the row claiming a licensed capability under a limited license runs
     inside one transaction that takes an advisory lock in its own statement before counting
     (a statement's snapshot predates anything it locks), so pods cannot both pass the count:
     the DB rows (any pod, either JSON shape) plus this proxy's config.yaml routers are judged
@@ -319,21 +328,26 @@ async def _heuristic_v2_slot(
     """
     from litellm.proxy.proxy_server import _license_check, llm_router
 
-    limit: Final = _license_check.heuristic_v2_router_limit()
-    if limit is None or not uses_heuristic_v2_classifier(effective_config):
+    limit: Final = _license_check.auto_router_capability_limit()
+    capability: Final = claimed_capability(effective_config)
+    if limit is None or capability is None:
         yield _proxy_model_table(prisma_client)
         return
     async with prisma_client.db.tx() as tx_ctx:
         tables: Final[_TxModelTables] = tx_ctx
-        await tx_ctx.query_raw(_HEURISTIC_V2_LOCK_SQL, HEURISTIC_V2_SLOT_LOCK_KEY)
-        rows: Sequence[Mapping[str, object]] = await tx_ctx.query_raw(_HEURISTIC_V2_DB_ROWS_SQL, model_id or "")
+        await tx_ctx.query_raw(_CAPABILITY_LOCK_SQL, AUTO_ROUTER_CAPABILITY_SLOT_LOCK_KEY)
+        rows: Sequence[Mapping[str, object]] = await tx_ctx.query_raw(
+            _CAPABILITY_DB_ROWS_SQL[capability.key], model_id or ""
+        )
         db_held: Final = rows[0].get("held") if rows else 0
         config_rows: Final = () if llm_router is None else tuple(llm_router.config_deployments())
-        held: Final = (db_held if isinstance(db_held, int) else 0) + count_heuristic_v2_routers(config_rows)
-        violation: Final = heuristic_v2_limit_violation(held=held + 1, limit=limit)
+        held: Final = (db_held if isinstance(db_held, int) else 0) + count_capability_routers(
+            config_rows, capability=capability
+        )
+        violation: Final = capability_limit_violation(capability=capability, held=held + 1, limit=limit)
         if violation is not None:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail=f"{violation} {HEURISTIC_V2_LICENSE_REMEDY}"
+                status_code=status.HTTP_403_FORBIDDEN, detail=f"{violation} {AUTO_ROUTER_LICENSE_REMEDY}"
             )
         yield tables.litellm_proxymodeltable
     await publish_config_change(redis_cache=coordination_redis_cache(), object_type="litellm_proxymodeltable")
@@ -797,7 +811,7 @@ async def patch_model(
             stored_model_name = update_data.get("model_name")
             update_data["updated_by"] = user_api_key_dict.user_id or litellm_proxy_admin_name
             update_data["updated_at"] = cast(str, get_utc_datetime())
-            async with _heuristic_v2_slot(
+            async with _auto_router_capability_slot(
                 prisma_client,
                 effective_config=_effective_complexity_router_config(
                     patch_data.litellm_params, db_model.litellm_params
@@ -1957,7 +1971,7 @@ async def add_new_model(
                     model_params=priced_model_params,
                     user_api_key_dict=user_api_key_dict,
                     prisma_client=prisma_client,
-                    slot=_heuristic_v2_slot(
+                    slot=_auto_router_capability_slot(
                         prisma_client,
                         effective_config=priced_model_params.litellm_params.complexity_router_config,
                         model_id=priced_model_params.model_info.id,
@@ -2145,7 +2159,7 @@ async def update_model(
                 "updated_by": user_api_key_dict.user_id or LITELLM_PROXY_ADMIN_NAME,
                 **({} if renamed_to is None else {"model_name": renamed_to}),
             }
-            async with _heuristic_v2_slot(
+            async with _auto_router_capability_slot(
                 prisma_client,
                 effective_config=_effective_complexity_router_config(
                     model_params.litellm_params, deployment.litellm_params
