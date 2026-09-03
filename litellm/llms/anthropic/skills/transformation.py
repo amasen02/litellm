@@ -2,6 +2,7 @@
 Anthropic Skills API configuration and transformations
 """
 
+from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
@@ -36,12 +37,7 @@ class AnthropicSkillsConfig(BaseSkillsAPIConfig):
 
     def validate_environment(self, headers: dict, litellm_params: GenericLiteLLMParams | None) -> dict:
         """Add Anthropic-specific headers"""
-        from litellm.constants import ANTHROPIC_SKILLS_API_BETA_VERSION
-        from litellm.llms.anthropic.common_utils import (
-            AnthropicModelInfo,
-            merge_anthropic_beta_headers,
-            without_caller_credential_headers,
-        )
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
 
         auth_header: Final = AnthropicModelInfo.get_auth_header(
             api_key=litellm_params.api_key if litellm_params is not None else None,
@@ -49,6 +45,29 @@ class AnthropicSkillsConfig(BaseSkillsAPIConfig):
             litellm_params=MappingProxyType(dict(litellm_params)) if litellm_params is not None else None,
             allow_workload_identity=True,
         )
+        return self._finalize_headers(headers, auth_header)
+
+    async def avalidate_environment(self, headers: dict, litellm_params: GenericLiteLLMParams | None) -> dict:
+        """Async counterpart of validate_environment: the WIF tier can block on a token
+        exchange POST, so async callers await it off the event loop."""
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        auth_header: Final = await AnthropicModelInfo.aget_auth_header(
+            api_key=litellm_params.api_key if litellm_params is not None else None,
+            api_base=litellm_params.api_base if litellm_params is not None else None,
+            litellm_params=MappingProxyType(dict(litellm_params)) if litellm_params is not None else None,
+            allow_workload_identity=True,
+        )
+        return self._finalize_headers(headers, auth_header)
+
+    @staticmethod
+    def _finalize_headers(headers: dict, auth_header: Mapping[str, str] | None) -> dict:
+        from litellm.constants import ANTHROPIC_SKILLS_API_BETA_VERSION
+        from litellm.llms.anthropic.common_utils import (
+            merge_anthropic_beta_headers,
+            without_caller_credential_headers,
+        )
+
         if auth_header is None:
             raise ValueError("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is required for Skills API")
 

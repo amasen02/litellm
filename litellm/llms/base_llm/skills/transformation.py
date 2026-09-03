@@ -2,6 +2,7 @@
 Base configuration class for Skills API
 """
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,13 @@ class BaseSkillsAPIConfig(ABC):
             Updated headers dictionary
         """
         return headers
+
+    async def avalidate_environment(self, headers: dict, litellm_params: GenericLiteLLMParams | None) -> dict:
+        """Async counterpart of validate_environment. The default offloads the sync hook to
+        a worker thread so async callers never block the event loop on it; providers whose
+        credential resolution can block on I/O (e.g. Anthropic's workload identity token
+        exchange) should override this to await the async form directly."""
+        return await asyncio.to_thread(self.validate_environment, headers=headers, litellm_params=litellm_params)
 
     @abstractmethod
     def get_complete_url(

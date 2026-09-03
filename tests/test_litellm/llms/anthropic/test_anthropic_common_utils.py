@@ -2919,6 +2919,26 @@ class TestWifAsyncSeam:
         assert poster.thread_ids[0] != threading.get_ident()
 
     @pytest.mark.asyncio
+    async def test_avalidate_skills_environment_mints_off_loop(self, wif_async_engine, monkeypatch):
+        """The skills surface must resolve WIF through the async facade so a cold
+        mint on an async skills call never falls through to the sync token exchange."""
+        from litellm.llms.anthropic.skills.transformation import AnthropicSkillsConfig
+        from litellm.types.router import GenericLiteLLMParams
+
+        poster, sync_calls = wif_async_engine
+        for name, value in WIF_ENV.items():
+            monkeypatch.setenv(name, value)
+
+        headers = await AnthropicSkillsConfig().avalidate_environment(
+            headers={},
+            litellm_params=GenericLiteLLMParams(),
+        )
+
+        assert headers["authorization"] == f"Bearer {FAKE_MINTED_TOKEN}"
+        assert sync_calls == []
+        assert poster.thread_ids[0] != threading.get_ident()
+
+    @pytest.mark.asyncio
     async def test_avalidate_delegates_to_subclass_sync_override(self):
         """A provider subclass that only overrides the sync method must keep its
         behavior when the handler goes through the async variant."""

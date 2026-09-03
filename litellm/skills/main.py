@@ -68,6 +68,130 @@ def _get_litellm_skills_handler():
     return _litellm_skills_handler
 
 
+# Async paths await avalidate_environment so a cold WIF mint goes through the async
+# httpx client and does not consume a worker thread on the token exchange POST.
+
+
+async def _acreate_skill_dispatch(
+    *,
+    url: str,
+    request_body: dict,
+    skills_api_provider_config: BaseSkillsAPIConfig,
+    custom_llm_provider: str,
+    litellm_params: GenericLiteLLMParams,
+    logging_obj: LiteLLMLoggingObj,
+    extra_headers: dict[str, Any] | None,
+    timeout: float | httpx.Timeout,
+    client: Any,
+    shared_session: Any,
+) -> Skill:
+    headers: Final = await skills_api_provider_config.avalidate_environment(
+        headers=extra_headers or {},
+        litellm_params=litellm_params,
+    )
+    return await base_llm_http_handler.async_create_skill_handler(
+        url=url,
+        request_body=request_body,
+        skills_api_provider_config=skills_api_provider_config,
+        custom_llm_provider=custom_llm_provider,
+        litellm_params=litellm_params,
+        logging_obj=logging_obj,
+        extra_headers=headers,
+        timeout=timeout,
+        client=client,
+        shared_session=shared_session,
+    )
+
+
+async def _alist_skills_dispatch(
+    *,
+    url: str,
+    query_params: dict,
+    skills_api_provider_config: BaseSkillsAPIConfig,
+    custom_llm_provider: str,
+    litellm_params: GenericLiteLLMParams,
+    logging_obj: LiteLLMLoggingObj,
+    extra_headers: dict[str, Any] | None,
+    timeout: float | httpx.Timeout,
+    client: Any,
+    shared_session: Any,
+) -> ListSkillsResponse:
+    headers: Final = await skills_api_provider_config.avalidate_environment(
+        headers=extra_headers or {},
+        litellm_params=litellm_params,
+    )
+    return await base_llm_http_handler.async_list_skills_handler(
+        url=url,
+        query_params=query_params,
+        skills_api_provider_config=skills_api_provider_config,
+        custom_llm_provider=custom_llm_provider,
+        litellm_params=litellm_params,
+        logging_obj=logging_obj,
+        extra_headers=headers,
+        timeout=timeout,
+        client=client,
+        shared_session=shared_session,
+    )
+
+
+async def _aget_skill_dispatch(
+    *,
+    url: str,
+    skills_api_provider_config: BaseSkillsAPIConfig,
+    custom_llm_provider: str,
+    litellm_params: GenericLiteLLMParams,
+    logging_obj: LiteLLMLoggingObj,
+    extra_headers: dict[str, Any] | None,
+    timeout: float | httpx.Timeout,
+    client: Any,
+    shared_session: Any,
+) -> Skill:
+    headers: Final = await skills_api_provider_config.avalidate_environment(
+        headers=extra_headers or {},
+        litellm_params=litellm_params,
+    )
+    return await base_llm_http_handler.async_get_skill_handler(
+        url=url,
+        skills_api_provider_config=skills_api_provider_config,
+        custom_llm_provider=custom_llm_provider,
+        litellm_params=litellm_params,
+        logging_obj=logging_obj,
+        extra_headers=headers,
+        timeout=timeout,
+        client=client,
+        shared_session=shared_session,
+    )
+
+
+async def _adelete_skill_dispatch(
+    *,
+    url: str,
+    skills_api_provider_config: BaseSkillsAPIConfig,
+    custom_llm_provider: str,
+    litellm_params: GenericLiteLLMParams,
+    logging_obj: LiteLLMLoggingObj,
+    extra_headers: dict[str, Any] | None,
+    timeout: float | httpx.Timeout,
+    client: Any,
+    shared_session: Any,
+) -> DeleteSkillResponse:
+    headers: Final = await skills_api_provider_config.avalidate_environment(
+        headers=extra_headers or {},
+        litellm_params=litellm_params,
+    )
+    return await base_llm_http_handler.async_delete_skill_handler(
+        url=url,
+        skills_api_provider_config=skills_api_provider_config,
+        custom_llm_provider=custom_llm_provider,
+        litellm_params=litellm_params,
+        logging_obj=logging_obj,
+        extra_headers=headers,
+        timeout=timeout,
+        client=client,
+        shared_session=shared_session,
+    )
+
+
 @client
 async def acreate_skill(
     files: list[Any] | None = None,
@@ -203,24 +327,17 @@ def create_skill(
         if skills_api_provider_config is None:
             raise ValueError(f"CREATE skill is not supported for {custom_llm_provider}")
 
-        # Validate environment and get headers
-        headers = extra_headers or {}
-        headers = skills_api_provider_config.validate_environment(headers=headers, litellm_params=litellm_params)
-
-        # Transform request
         request_body: Final = skills_api_provider_config.transform_create_skill_request(
             create_request=create_request,
             litellm_params=litellm_params,
-            headers=headers,
+            headers=extra_headers or {},
         )
 
-        # Get API base and URL
         from litellm.llms.anthropic.common_utils import AnthropicModelInfo
 
         api_base: Final = AnthropicModelInfo.get_api_base(litellm_params.api_base)
         url: Final = skills_api_provider_config.get_complete_url(api_base=api_base, endpoint="skills")
 
-        # Pre-call logging
         litellm_logging_obj.update_from_kwargs(
             kwargs=kwargs,
             model=None,
@@ -231,8 +348,24 @@ def create_skill(
             custom_llm_provider=custom_llm_provider,
         )
 
-        # Make HTTP request
-        response: Final = base_llm_http_handler.create_skill_handler(
+        if _is_async:
+            return _acreate_skill_dispatch(
+                url=url,
+                request_body=request_body,
+                skills_api_provider_config=skills_api_provider_config,
+                custom_llm_provider=custom_llm_provider,
+                litellm_params=litellm_params,
+                logging_obj=litellm_logging_obj,
+                extra_headers=extra_headers,
+                timeout=timeout or request_timeout,
+                client=kwargs.get("client"),
+                shared_session=kwargs.get("shared_session"),
+            )
+
+        headers = extra_headers or {}
+        headers = skills_api_provider_config.validate_environment(headers=headers, litellm_params=litellm_params)
+
+        return base_llm_http_handler.create_skill_handler(
             url=url,
             request_body=request_body,
             skills_api_provider_config=skills_api_provider_config,
@@ -241,12 +374,10 @@ def create_skill(
             logging_obj=litellm_logging_obj,
             extra_headers=headers,
             timeout=timeout or request_timeout,
-            _is_async=_is_async,
+            _is_async=False,
             client=kwargs.get("client"),
             shared_session=kwargs.get("shared_session"),
         )
-
-        return response
     except Exception as e:
         raise litellm.exception_type(
             model=None,
@@ -392,18 +523,12 @@ def list_skills(
         if extra_query:
             list_params.update(extra_query)
 
-        # Validate environment and get headers
-        headers = extra_headers or {}
-        headers = skills_api_provider_config.validate_environment(headers=headers, litellm_params=litellm_params)
-
-        # Transform request
         url, query_params = skills_api_provider_config.transform_list_skills_request(
             list_params=list_params,
             litellm_params=litellm_params,
-            headers=headers,
+            headers=extra_headers or {},
         )
 
-        # Pre-call logging
         litellm_logging_obj.update_from_kwargs(
             kwargs=kwargs,
             model=None,
@@ -414,8 +539,24 @@ def list_skills(
             custom_llm_provider=custom_llm_provider,
         )
 
-        # Make HTTP request
-        response: Final = base_llm_http_handler.list_skills_handler(
+        if _is_async:
+            return _alist_skills_dispatch(
+                url=url,
+                query_params=query_params,
+                skills_api_provider_config=skills_api_provider_config,
+                custom_llm_provider=custom_llm_provider,
+                litellm_params=litellm_params,
+                logging_obj=litellm_logging_obj,
+                extra_headers=extra_headers,
+                timeout=timeout or request_timeout,
+                client=kwargs.get("client"),
+                shared_session=kwargs.get("shared_session"),
+            )
+
+        headers = extra_headers or {}
+        headers = skills_api_provider_config.validate_environment(headers=headers, litellm_params=litellm_params)
+
+        return base_llm_http_handler.list_skills_handler(
             url=url,
             query_params=query_params,
             skills_api_provider_config=skills_api_provider_config,
@@ -424,12 +565,10 @@ def list_skills(
             logging_obj=litellm_logging_obj,
             extra_headers=headers,
             timeout=timeout or request_timeout,
-            _is_async=_is_async,
+            _is_async=False,
             client=kwargs.get("client"),
             shared_session=kwargs.get("shared_session"),
         )
-
-        return response
     except Exception as e:
         raise litellm.exception_type(
             model=None,
@@ -551,24 +690,17 @@ def get_skill(
         if skills_api_provider_config is None:
             raise ValueError(f"GET skill is not supported for {custom_llm_provider}")
 
-        # Validate environment and get headers
-        headers = extra_headers or {}
-        headers = skills_api_provider_config.validate_environment(headers=headers, litellm_params=litellm_params)
-
-        # Get API base
         from litellm.llms.anthropic.common_utils import AnthropicModelInfo
 
         api_base: Final = AnthropicModelInfo.get_api_base(litellm_params.api_base)
 
-        # Transform request
-        url, headers = skills_api_provider_config.transform_get_skill_request(
+        url, _ = skills_api_provider_config.transform_get_skill_request(
             skill_id=skill_id,
             api_base=api_base or DEFAULT_ANTHROPIC_API_BASE,
             litellm_params=litellm_params,
-            headers=headers,
+            headers=extra_headers or {},
         )
 
-        # Pre-call logging
         litellm_logging_obj.update_from_kwargs(
             kwargs=kwargs,
             model=None,
@@ -579,8 +711,23 @@ def get_skill(
             custom_llm_provider=custom_llm_provider,
         )
 
-        # Make HTTP request
-        response: Final = base_llm_http_handler.get_skill_handler(
+        if _is_async:
+            return _aget_skill_dispatch(
+                url=url,
+                skills_api_provider_config=skills_api_provider_config,
+                custom_llm_provider=custom_llm_provider,
+                litellm_params=litellm_params,
+                logging_obj=litellm_logging_obj,
+                extra_headers=extra_headers,
+                timeout=timeout or request_timeout,
+                client=kwargs.get("client"),
+                shared_session=kwargs.get("shared_session"),
+            )
+
+        headers = extra_headers or {}
+        headers = skills_api_provider_config.validate_environment(headers=headers, litellm_params=litellm_params)
+
+        return base_llm_http_handler.get_skill_handler(
             url=url,
             skills_api_provider_config=skills_api_provider_config,
             custom_llm_provider=custom_llm_provider,
@@ -588,12 +735,10 @@ def get_skill(
             logging_obj=litellm_logging_obj,
             extra_headers=headers,
             timeout=timeout or request_timeout,
-            _is_async=_is_async,
+            _is_async=False,
             client=kwargs.get("client"),
             shared_session=kwargs.get("shared_session"),
         )
-
-        return response
     except Exception as e:
         raise litellm.exception_type(
             model=None,
@@ -715,24 +860,17 @@ def delete_skill(
         if skills_api_provider_config is None:
             raise ValueError(f"DELETE skill is not supported for {custom_llm_provider}")
 
-        # Validate environment and get headers
-        headers = extra_headers or {}
-        headers = skills_api_provider_config.validate_environment(headers=headers, litellm_params=litellm_params)
-
-        # Get API base
         from litellm.llms.anthropic.common_utils import AnthropicModelInfo
 
         api_base: Final = AnthropicModelInfo.get_api_base(litellm_params.api_base)
 
-        # Transform request
-        url, headers = skills_api_provider_config.transform_delete_skill_request(
+        url, _ = skills_api_provider_config.transform_delete_skill_request(
             skill_id=skill_id,
             api_base=api_base or DEFAULT_ANTHROPIC_API_BASE,
             litellm_params=litellm_params,
-            headers=headers,
+            headers=extra_headers or {},
         )
 
-        # Pre-call logging
         litellm_logging_obj.update_from_kwargs(
             kwargs=kwargs,
             model=None,
@@ -743,8 +881,23 @@ def delete_skill(
             custom_llm_provider=custom_llm_provider,
         )
 
-        # Make HTTP request
-        response: Final = base_llm_http_handler.delete_skill_handler(
+        if _is_async:
+            return _adelete_skill_dispatch(
+                url=url,
+                skills_api_provider_config=skills_api_provider_config,
+                custom_llm_provider=custom_llm_provider,
+                litellm_params=litellm_params,
+                logging_obj=litellm_logging_obj,
+                extra_headers=extra_headers,
+                timeout=timeout or request_timeout,
+                client=kwargs.get("client"),
+                shared_session=kwargs.get("shared_session"),
+            )
+
+        headers = extra_headers or {}
+        headers = skills_api_provider_config.validate_environment(headers=headers, litellm_params=litellm_params)
+
+        return base_llm_http_handler.delete_skill_handler(
             url=url,
             skills_api_provider_config=skills_api_provider_config,
             custom_llm_provider=custom_llm_provider,
@@ -752,12 +905,10 @@ def delete_skill(
             logging_obj=litellm_logging_obj,
             extra_headers=headers,
             timeout=timeout or request_timeout,
-            _is_async=_is_async,
+            _is_async=False,
             client=kwargs.get("client"),
             shared_session=kwargs.get("shared_session"),
         )
-
-        return response
     except Exception as e:
         raise litellm.exception_type(
             model=None,
