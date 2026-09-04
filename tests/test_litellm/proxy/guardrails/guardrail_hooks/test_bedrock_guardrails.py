@@ -1137,7 +1137,7 @@ async def test_bedrock_apply_guardrail_response_uses_OUTPUT_source():
         mock_api.assert_called_once()
         kwargs = mock_api.call_args.kwargs
         assert kwargs["source"] == "OUTPUT"
-        assert kwargs["request_data"] == {"model": "gpt-4o"}
+        assert kwargs["request_data"]["model"] == "gpt-4o"
         synthetic = kwargs["response"]
         assert isinstance(synthetic, ModelResponse)
         assert len(synthetic.choices) == 2

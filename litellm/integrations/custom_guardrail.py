@@ -73,6 +73,8 @@ _guardrail_self_recorded: Final[contextvars.ContextVar[bool]] = contextvars.Cont
     "litellm_guardrail_self_recorded", default=False
 )
 
+_LOGS_GUARDRAIL_INFORMATION_MARKER: Final = "_litellm_logs_guardrail_information"
+
 
 def is_guardrail_intervention(e: Exception) -> bool:
     """
@@ -150,6 +152,13 @@ class CustomGuardrail(CustomLogger):
     use_native_lifecycle_hooks: ClassVar[bool] = False
 
     records_own_guardrail_information: ClassVar[bool] = False
+
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        own_apply_guardrail: Final = cls.__dict__.get("apply_guardrail")
+        if own_apply_guardrail is None or _LOGS_GUARDRAIL_INFORMATION_MARKER in vars(own_apply_guardrail):
+            return
+        cls.apply_guardrail = log_guardrail_information(own_apply_guardrail)
 
     def __init__(
         self,
@@ -1559,4 +1568,5 @@ def log_guardrail_information(func):
             return async_wrapper(*args, **kwargs)
         return sync_wrapper(*args, **kwargs)
 
+    vars(wrapper)[_LOGS_GUARDRAIL_INFORMATION_MARKER] = True
     return wrapper
