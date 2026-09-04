@@ -881,6 +881,15 @@ def _caller_may_probe_deployment(
     deployment: Mapping[str, object], allowed_models: frozenset[str], llm_router: Router | None, team_id: str | None
 ) -> bool:
     """Same deployment visibility rule as request auth: another team's deployment is never in scope."""
+    model_info: Final = deployment.get("model_info")
+    deployment_team_id: Final = model_info.get("team_id") if isinstance(model_info, Mapping) else None
+    # A team-owned deployment is only in scope for a caller from that same
+    # team. Router.should_include_deployment treats a caller `team_id` of
+    # None as "no team constraint" and would otherwise let a no-team key
+    # probe another team's deployment whenever its internal `model_name`
+    # landed in the caller's allowed set via a shared access group.
+    if deployment_team_id is not None and deployment_team_id != team_id:
+        return False
     if llm_router is None:
         return deployment.get("model_name") in allowed_models
     model: Final = dict(deployment)

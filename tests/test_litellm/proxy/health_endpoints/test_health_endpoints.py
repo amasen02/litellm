@@ -2868,6 +2868,47 @@ async def test_health_endpoint_hides_another_teams_deployment_on_background_cach
     assert result["healthy_count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_health_endpoint_hides_team_deployment_from_no_team_caller_via_shared_access_group():
+    """
+    A no-team key whose ``models`` grants a shared access group must not
+    reach past the team boundary either: expanding the group pulls in the
+    internal ``model_name`` of every team-owned member, and the router
+    would otherwise treat a caller ``team_id`` of None as "no team
+    constraint" and probe those team-owned deployments with the other
+    team's credentials.
+    """
+    probed = await _live_probed_model_ids(
+        _TEAM_MODEL_LIST,
+        UserAPIKeyAuth(api_key="hashed-test-key", models=["bedrock-group"], team_id=None),
+    )
+
+    assert probed == {"id-bedrock"}
+
+
+@pytest.mark.asyncio
+async def test_health_endpoint_hides_team_deployment_from_no_team_caller_on_background_cache_path():
+    from fastapi import Response
+
+    from litellm.proxy.health_endpoints._health_endpoints import health_endpoint
+
+    with _proxy_health_globals(
+        _TEAM_MODEL_LIST,
+        _router_for(_TEAM_MODEL_LIST),
+        use_background_health_checks=True,
+        health_check_results=_TEAM_CACHED_RESULTS,
+    ):
+        result = await health_endpoint(
+            response=Response(),
+            user_api_key_dict=UserAPIKeyAuth(api_key="hashed-test-key", models=["bedrock-group"], team_id=None),
+            model=None,
+            model_id=None,
+        )
+
+    assert [ep["model_id"] for ep in result["healthy_endpoints"]] == ["id-bedrock"]
+    assert result["healthy_count"] == 1
+
+
 def test_health_test_connection_keeps_error_and_raw_request_through_the_allowlist(monkeypatch):
     """
     The dashboard's Test Connect button reads ``result.error`` and
