@@ -181,14 +181,12 @@ def _row_with_recovered_fields(
     if not isinstance(api_key, str) or api_key not in recovered:
         return row
     meta: Final = recovered[api_key]
-    return MappingProxyType(
-        {
-            **row,
-            alias_field: meta.get("key_alias") or row.get(alias_field),
-            team_id_field: meta.get("team_id") or row.get(team_id_field),
-            user_email_field: row.get(user_email_field) or meta.get("user_email"),
-        }
-    )
+    return {  # mutable-ok: polars.DataFrame row construction dispatches on dict, not Mapping
+        **row,
+        alias_field: meta.get("key_alias") or row.get(alias_field),
+        team_id_field: meta.get("team_id") or row.get(team_id_field),
+        user_email_field: row.get(user_email_field) or meta.get("user_email"),
+    }
 
 
 async def fill_missing_api_key_aliases(
@@ -211,9 +209,7 @@ async def fill_missing_api_key_aliases(
         key
         for row in rows
         for key in (row.get(api_key_field),)
-        if isinstance(key, str)
-        and key
-        and (row.get(alias_field) in (None, "") or row.get(user_email_field) in (None, ""))
+        if isinstance(key, str) and key and row.get(alias_field) in (None, "")
     )
     if not missing_keys:
         return tuple(rows)
