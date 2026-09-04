@@ -246,10 +246,11 @@ class AnthropicPassthroughLoggingHandler:
                 model=AnthropicPassthroughLoggingHandler._resolve_costing_model(model, litellm_logging_obj),
                 logging_obj=litellm_logging_obj,
             )
-        except Exception as e:  # noqa: BLE001  # an uncostable partial stream must still log as a failure
+        except Exception as e:  # noqa: BLE001  # an uncostable partial stream must still log its recovered usage so TPM settles correctly
             verbose_proxy_logger.warning(
                 "Anthropic passthrough: could not cost the partial usage of a failed stream (model=%s): %s", model, e
             )
+            litellm_logging_obj.record_partial_usage_for_failure(usage=usage, response_cost=0.0)
             return
         litellm_logging_obj.record_partial_usage_for_failure(usage=usage, response_cost=response_cost)
 

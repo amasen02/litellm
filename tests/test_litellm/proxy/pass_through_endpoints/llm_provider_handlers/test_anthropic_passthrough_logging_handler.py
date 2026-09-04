@@ -2516,3 +2516,24 @@ class TestRecordPartialUsageForFailure:
 
         assert "combined_usage_object" not in logging_obj.model_call_details
         assert "response_cost" not in logging_obj.model_call_details
+
+    def test_stashes_partial_usage_with_zero_cost_when_costing_raises(self):
+        """If completion_cost blows up (unknown model, missing price map, custom
+        pricing lookup error), we must still stash the recovered usage so the
+        TPM reservation settles and the spend row keeps the provider-billed
+        tokens; only the response_cost falls back to 0."""
+        logging_obj = self._make_logging_obj()
+
+        with patch(
+            "litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler.litellm.completion_cost",
+            side_effect=RuntimeError("no price map for this model"),
+        ):
+            AnthropicPassthroughLoggingHandler.record_partial_usage_for_failure(
+                litellm_logging_obj=logging_obj,
+                request_body={"model": "claude-sonnet-5", "stream": True},
+                all_chunks=self._interrupted_chunks(),
+            )
+
+        usage = logging_obj.model_call_details["combined_usage_object"]
+        assert usage.prompt_tokens == 52
+        assert logging_obj.model_call_details["response_cost"] == 0.0
