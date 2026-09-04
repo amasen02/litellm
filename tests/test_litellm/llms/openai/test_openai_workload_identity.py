@@ -596,6 +596,14 @@ class TestDiscoverModels:
 
 
     @respx.mock
+    def test_empty_api_base_falls_back_to_openai_host(self, deployment_wif: dict[str, str]) -> None:
+        mock_token_exchange("empty-base-bearer")
+        models_route: Final = self.mock_models()
+
+        assert OpenAIGPTConfig().discover_models({**deployment_wif, "api_base": ""}) == ["gpt-4o-mini", "gpt-4.1"]
+        assert models_route.calls.last.request.headers["Authorization"] == "Bearer empty-base-bearer"
+
+    @respx.mock
     def test_empty_static_key_never_borrows_the_env_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env-key-that-must-stay-home")
         foreign_models: Final = respx.get("https://third-party.example/v1/models").mock(
