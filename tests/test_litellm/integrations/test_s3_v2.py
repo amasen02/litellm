@@ -1146,8 +1146,31 @@ def test_s3_object_key_sanitizes_slashes_in_file_name():
 
     assert key == (
         "LiteLLMAPPLogs/myteam/2026-02-11/"
-        "time-00-35-18-391582_arn:aws:bedrock:us-east-1:123456789012:model-invocation-job_gl18r6skk9yy.json"
+        "time-00-35-18-391582_arn_aws_bedrock_us-east-1_123456789012_model-invocation-job_gl18r6skk9yy.json"
     )
+
+
+@pytest.mark.parametrize(
+    "response_id",
+    [
+        "s3://example-batch-bucket/input.jsonl",
+        "gs://example-batch-bucket/input.jsonl",
+        "arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/example",
+    ],
+)
+def test_s3_object_key_sanitizes_colons_for_uri_safety(response_id: str):
+    """Bedrock s3://, Vertex gs://, and ARN file IDs must produce URI-safe filenames with no colons (#40234)."""
+    from litellm.integrations.s3 import get_s3_object_key
+
+    start_time = datetime(2026, 9, 7, 4, 51, 6, 685889)
+    key = get_s3_object_key(
+        s3_path="",
+        prefix="",
+        start_time=start_time,
+        s3_file_name=f"time-04-51-06-685889_{response_id}",
+    )
+    filename = key.rsplit("/", 1)[-1]
+    assert ":" not in filename, f"Colon found in generated S3 filename: {filename}"
 
 
 def test_create_s3_batch_logging_element_flat_key_for_arn_response_id():
