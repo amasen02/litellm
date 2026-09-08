@@ -4077,6 +4077,112 @@ async def test_view_spend_logs_summarize_unhashed_api_key_without_padding(client
 
 
 @pytest.mark.asyncio
+async def test_view_spend_logs_includes_end_date_activity(client, monkeypatch):
+    """Test that activity on the last day of the date range is returned and not zeroed out (#40216)."""
+    mock_rows = [
+        {
+            "day": "2024-01-01",
+            "api_key": "plain-key",
+            "user": "u1",
+            "model": "gpt-4",
+            "spend": 0.2,
+        },
+        {
+            "day": "2024-01-02",
+            "api_key": "plain-key",
+            "user": "u1",
+            "model": "gpt-4",
+            "spend": 0.3,
+        },
+    ]
+
+    class MockDB:
+        def __init__(self):
+            self.captured_sql = None
+            self.captured_params = None
+
+        async def query_raw(self, sql_query, *params):
+            self.captured_sql = sql_query
+            self.captured_params = params
+            return mock_rows
+
+    class MockPrismaClient:
+        def __init__(self):
+            self.db = MockDB()
+
+        def hash_token(self, token):
+            return token
+
+    mock_prisma_client = MockPrismaClient()
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", mock_prisma_client)
+    app.dependency_overrides[ps.user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN
+    )
+    try:
+        response = client.get(
+            "/spend/logs",
+            params={
+                "start_date": "2024-01-01",
+                "end_date": "2024-01-02",
+                "api_key": "plain-key",
+            },
+            headers={"Authorization": "Bearer sk-test"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 2
+        assert data[0]["startTime"] == "2024-01-01"
+        assert data[0]["spend"] == pytest.approx(0.2)
+        assert data[1]["startTime"] == "2024-01-02"
+        assert data[1]["spend"] == pytest.approx(0.3)
+        assert mock_prisma_client.db.captured_sql is not None
+        assert "INTERVAL '1 day'" in mock_prisma_client.db.captured_sql
+    finally:
+        app.dependency_overrides.pop(ps.user_api_key_auth, None)
+
+
+@pytest.mark.asyncio
+async def test_view_spend_logs_unsummarized_date_range_includes_end_date(client, monkeypatch):
+    """Test that summarize=false uses an exclusive upper bound to include full end_date (#40216)."""
+    captured_where = {}
+
+    async def mock_find_spend_logs(prisma_client, where, order, take, http_response):
+        nonlocal captured_where
+        captured_where = where
+        return [{"id": "log-1", "spend": 0.05, "startTime": "2024-01-02T15:30:00+00:00"}]
+
+    class MockPrismaClient:
+        def hash_token(self, token):
+            return token
+
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", MockPrismaClient())
+    monkeypatch.setattr(
+        "litellm.proxy.spend_tracking.spend_management_endpoints._find_spend_logs",
+        mock_find_spend_logs,
+    )
+    app.dependency_overrides[ps.user_api_key_auth] = lambda: UserAPIKeyAuth(
+        user_role=LitellmUserRoles.PROXY_ADMIN
+    )
+    try:
+        response = client.get(
+            "/spend/logs",
+            params={
+                "start_date": "2024-01-01",
+                "end_date": "2024-01-02",
+                "summarize": "false",
+            },
+            headers={"Authorization": "Bearer sk-test"},
+        )
+
+        assert response.status_code == 200
+        assert captured_where["startTime"]["gte"] == "2024-01-01T00:00:00+00:00"
+        assert captured_where["startTime"]["lt"] == "2024-01-03T00:00:00+00:00"
+    finally:
+        app.dependency_overrides.pop(ps.user_api_key_auth, None)
+
+
+@pytest.mark.asyncio
 async def test_ui_view_spend_logs_with_error_code(client):
     """Test filtering spend logs by error code"""
     mock_spend_logs = [

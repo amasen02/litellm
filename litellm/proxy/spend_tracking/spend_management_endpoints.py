@@ -276,7 +276,7 @@ SELECT
     model,
     SUM(spend) AS spend
 FROM "LiteLLM_SpendLogs"
-WHERE "startTime" >= ($1::timestamptz AT TIME ZONE 'UTC') AND "startTime" <= ($2::timestamptz AT TIME ZONE 'UTC')
+WHERE "startTime" >= ($1::timestamptz AT TIME ZONE 'UTC') AND "startTime" < (($2::timestamptz + INTERVAL '1 day') AT TIME ZONE 'UTC')
 {filter_sql}
 GROUP BY 1, 2, 3, 4
 ORDER BY 1
@@ -3317,17 +3317,19 @@ async def view_spend_logs(
             # Convert the date strings to datetime objects
             start_date_obj: Final = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             end_date_obj: Final = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end_date_exclusive_obj: Final = end_date_obj + timedelta(days=1)
 
             # Convert to ISO format strings for Prisma
             start_date_iso: Final = start_date_obj.isoformat()
             end_date_iso: Final = end_date_obj.isoformat()
+            end_date_exclusive_iso: Final = end_date_exclusive_obj.isoformat()
 
             filter_query: Final[
                 dict[str, object]
             ] = {  # mutable-ok: legacy filters are extended for optional parameters
                 "startTime": {
                     "gte": start_date_iso,  # Greater than or equal to Start Date
-                    "lte": end_date_iso,  # Less than or equal to End Date
+                    "lt": end_date_exclusive_iso,  # Less than End Date + 1 day (inclusive of full end_date)
                 }
             }
 
