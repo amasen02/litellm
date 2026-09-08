@@ -218,7 +218,7 @@ def _truncate_to_utf8_bytes(value: str, max_bytes: int) -> str:
 
 def get_s3_object_download_filename(start_time: datetime, response_id: str) -> str:
     """Content-Disposition filename for the uploaded object, bounded to the metadata header cap."""
-    sanitized_response_id: Final = response_id.replace("/", "_").replace('"', "_")
+    sanitized_response_id: Final = response_id.replace("/", "_").replace('"', "_").replace(":", "_")
     file_name: Final = f"time-{start_time.strftime('%Y-%m-%dT%H-%M-%S-%f')}_{response_id}"
     sanitized_file_name: Final = f"time-{start_time.strftime('%Y-%m-%dT%H-%M-%S-%f')}_{sanitized_response_id}"
     budget: Final = MAX_S3_OBJECT_DOWNLOAD_FILENAME_BYTES - len(b".json")
@@ -250,7 +250,7 @@ def get_s3_object_key(
     start_time: datetime,
     s3_file_name: str,
 ) -> str:
-    sanitized_s3_file_name: Final = s3_file_name.replace("/", "_")
+    sanitized_s3_file_name: Final = s3_file_name.replace("/", "_").replace(":", "_")
     configured_prefix: Final = (s3_path.rstrip("/") + "/" if s3_path else "") + prefix
     date_segment: Final = start_time.strftime("%Y-%m-%d") + "/"
     # we need the s3 key to include the time, so we log cache hits too
