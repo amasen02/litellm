@@ -250,6 +250,17 @@ def test_inception_model_configuration(monkeypatch):
     assert info.get("supports_tool_choice") is True
     assert info.get("supports_response_schema") is True
 
+    info_25 = get_model_info("inception/mercury-2.5")
+    assert info_25.get("litellm_provider") == "inception"
+    assert info_25.get("mode") == "chat"
+    assert info_25.get("max_input_tokens") == 260000
+    assert info_25.get("input_cost_per_token") == 2e-07
+    assert info_25.get("output_cost_per_token") == 7.5e-07
+    assert info_25.get("cache_read_input_token_cost") == 2e-08
+    assert info_25.get("supports_function_calling") is True
+    assert info_25.get("supports_tool_choice") is True
+    assert info_25.get("supports_response_schema") is True
+
 
 def test_inception_model_list_populated(monkeypatch):
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
@@ -258,6 +269,7 @@ def test_inception_model_list_populated(monkeypatch):
     litellm.add_known_models()
 
     assert "inception/mercury-2" in litellm.inception_models
+    assert "inception/mercury-2.5" in litellm.inception_models
     for model in litellm.inception_models:
         assert model.startswith("inception/")
 
